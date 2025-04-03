@@ -118,7 +118,7 @@ func main() {
     }
 
     server := &http.Server{
-        Addr: ":8888",
+        Addr: ":8080",
         Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
             if r.Method == http.MethodConnect {
                 serveConnect(w, r)
