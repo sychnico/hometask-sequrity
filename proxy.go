@@ -1,7 +1,6 @@
 package main
 
 import (
-    "crypto/tls"
     "flag"
     "io"
     "log"
@@ -9,15 +8,17 @@ import (
     "net/http"
     "time"
     "strings"
-    //"fmt"
 )
+
+var pemPath = "../server.pem"
+var keyPath = "../server.key"
 
 var hopHeaders = []string{
     "Connection",
     "Keep-Alive",
     "Proxy-Authenticate",
     "Proxy-Authorization",
-    "Te", // canonicalized version of "TE"
+    "Te", 
     "Trailers",
     "Transfer-Encoding",
     "Upgrade",
@@ -105,10 +106,6 @@ func transfer(destination io.WriteCloser, source io.ReadCloser) {
 }
 
 func main() {
-    var pemPath string
-    flag.StringVar(&pemPath, "pem", "server.pem", "path to pem file")
-    var keyPath string
-    flag.StringVar(&keyPath, "key", "server.key", "path to key file")
     var proto string
     flag.StringVar(&proto, "proto", "https", "Proxy protocol (http or https)")
     flag.Parse()
@@ -118,7 +115,7 @@ func main() {
     }
 
     server := &http.Server{
-        Addr: ":8080",
+        Addr: ":8888",
         Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
             if r.Method == http.MethodConnect {
                 serveConnect(w, r)
@@ -126,8 +123,6 @@ func main() {
                 serveHTTP(w, r)
             }
         }),
-        // Disable HTTP/2.
-        TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
     }
 
     if proto == "http" {
