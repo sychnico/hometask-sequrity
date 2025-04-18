@@ -7,7 +7,6 @@ import (
     "net"
     "net/http"
     "time"
-    "strings"
 )
 
 var pemPath = "../server.pem"
@@ -18,10 +17,51 @@ var hopHeaders = []string{
     "Keep-Alive",
     "Proxy-Authenticate",
     "Proxy-Authorization",
+    "Proxy-Connection",
     "Te", 
     "Trailers",
     "Transfer-Encoding",
     "Upgrade",
+}
+
+type ReqStruct struct {
+    method string
+    url string
+    headers map[string][]string
+    cookies []string
+    body string
+}
+
+type RespStruct struct {
+    status int
+    headers map[string][]string
+    cookies []string
+    body string
+}
+
+var RequestDB = make([]ReqStruct, 8)
+var ResponseDB = make([]RespStruct, 8)
+
+func storeRequestInDB(req *http.Request) {
+    reqCookies := req.Header["Cookie"]
+    bytedata, err := io.ReadAll(req.Body)
+    if err != nil {
+        log.Fatal("Error with parsing request")
+    }
+    reqBodyString := string(bytedata)
+    RequestDB = append(RequestDB, ReqStruct{method: req.Method, url: req.URL.String(), headers: req.Header, cookies: reqCookies, body: reqBodyString})
+    //log.Println(RequestDB[len(RequestDB)-1])
+}
+
+func storeResponseInDB(resp *http.Response){
+    respCookies := resp.Header["Cookie"]
+    bytedata, err := io.ReadAll(resp.Body)
+    if err != nil {
+        log.Fatal("Error with parsing response")
+    }
+    respBodyString := string(bytedata)
+    ResponseDB = append(ResponseDB, RespStruct{status: resp.StatusCode, headers: resp.Header, cookies: respCookies, body: respBodyString})
+    //log.Println(ResponseDB[len(ResponseDB)-1])
 }
 
 func copyHeader(dst, src http.Header) {
@@ -38,14 +78,6 @@ func delHopHeaders(header http.Header) {
     }
 }
 
-func appendHostToXForwardHeader(header http.Header, host string) {
-    if prior, ok := header["X-Forwarded-For"]; ok {
-        host = strings.Join(prior, ", ") + ", " + host
-    }
-    header.Set("X-Forwarded-For", host)
-}
-
-
 func serveHTTP(w http.ResponseWriter, req *http.Request) {
     
     log.Println(req.RemoteAddr, " ", req.Method, " ", req.URL)
@@ -56,10 +88,6 @@ func serveHTTP(w http.ResponseWriter, req *http.Request) {
 
     delHopHeaders(req.Header)
 
-    if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
-        appendHostToXForwardHeader(req.Header, clientIP)
-    }
-
     resp, err := client.Do(req)
     if err != nil {
         http.Error(w, "Server Error", http.StatusInternalServerError)
@@ -68,6 +96,9 @@ func serveHTTP(w http.ResponseWriter, req *http.Request) {
     defer resp.Body.Close()
 
     log.Println(req.RemoteAddr, " ", resp.Status)
+    
+    storeRequestInDB(req)
+    storeResponseInDB(resp)
 
     delHopHeaders(resp.Header)
 
