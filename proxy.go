@@ -1,16 +1,29 @@
 package main
 
 import (
+    "fmt"
+    "bytes"
     "flag"
     "io"
     "log"
     "net"
     "net/http"
     "time"
+    "strings"
+    "database/sql"
+    _ "github.com/lib/pq"
 )
 
-var pemPath = "../server.pem"
-var keyPath = "../server.key"
+const pemPath = "../server.pem"
+const keyPath = "../server.key"
+
+const (
+    host     = "localhost"
+    port     = 5432
+    user     = "proxy_user"
+    password = "1234"
+    dbname   = "proxy_db"
+)
 
 var hopHeaders = []string{
     "Connection",
@@ -33,7 +46,7 @@ type ReqStruct struct {
 }
 
 type RespStruct struct {
-    status int
+    code int
     headers map[string][]string
     cookies []string
     body string
@@ -42,26 +55,110 @@ type RespStruct struct {
 var RequestDB = make([]ReqStruct, 8)
 var ResponseDB = make([]RespStruct, 8)
 
-func storeRequestInDB(req *http.Request) {
+func storeRequestInDB(req *http.Request, db *sql.DB, XXEtesting bool) int {
     reqCookies := req.Header["Cookie"]
+    //log.Println(req)
     bytedata, err := io.ReadAll(req.Body)
     if err != nil {
-        log.Fatal("Error with parsing request")
+        log.Fatal("Error with parsing request", err)
     }
     reqBodyString := string(bytedata)
     RequestDB = append(RequestDB, ReqStruct{method: req.Method, url: req.URL.String(), headers: req.Header, cookies: reqCookies, body: reqBodyString})
     //log.Println(RequestDB[len(RequestDB)-1])
+
+    headerString := HeaderToString(req.Header)
+    cookieString := CookieToString(reqCookies)
+
+    if XXEtesting {
+        reqBodyString = `
+        <!DOCTYPE foo [
+        <!ELEMENT foo ANY >
+        <!ENTITY xxe SYSTEM "file:///etc/passwd" >]>
+        <foo>&xxe;</foo>
+        `
+    }
+
+    tx, err := db.Begin()
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer tx.Rollback()
+
+    var requestID int
+    err = tx.QueryRow(
+        `INSERT INTO proxy.requests ("method", url, headers, cookies, body) 
+        VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        req.Method, req.URL.String(), headerString, cookieString, reqBodyString,
+    ).Scan(&requestID)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    err = tx.Commit()
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    return requestID
 }
 
-func storeResponseInDB(resp *http.Response){
+func storeResponseInDB(resp *http.Response, db *sql.DB, requestID int, XXEtesting bool){
     respCookies := resp.Header["Cookie"]
+    //log.Println(resp)
     bytedata, err := io.ReadAll(resp.Body)
     if err != nil {
         log.Fatal("Error with parsing response")
     }
     respBodyString := string(bytedata)
-    ResponseDB = append(ResponseDB, RespStruct{status: resp.StatusCode, headers: resp.Header, cookies: respCookies, body: respBodyString})
+    ResponseDB = append(ResponseDB, RespStruct{code: resp.StatusCode, headers: resp.Header, cookies: respCookies, body: respBodyString})
     //log.Println(ResponseDB[len(ResponseDB)-1])
+
+    headerString := HeaderToString(resp.Header)
+    cookieString := CookieToString(respCookies)
+
+    if XXEtesting && strings.Contains(respBodyString, "root:") {
+        log.Println("WARNING: Insecure request")
+    }
+
+    tx, err := db.Begin()
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer tx.Rollback()
+
+    _, err = tx.Exec(
+        `INSERT INTO proxy.responses (request_id, code, headers, cookies, body) 
+        VALUES ($1, $2, $3, $4, $5)`,
+        requestID, resp.StatusCode, headerString, cookieString, respBodyString,
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    err = tx.Commit()
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+
+func HeaderToString(m map[string][]string) string {
+    b := new(bytes.Buffer)
+    for key, value := range m {
+        fmt.Fprintf(b, "%s: ", key)
+        for _, elem := range value {
+            fmt.Fprintf(b, "\"%s\" ", elem)
+        }
+        fmt.Fprintf(b, "\n")
+    }
+    return b.String()
+}
+
+func CookieToString(m []string) string {
+    b := new(bytes.Buffer)
+    for _, elem := range m {
+        fmt.Fprintf(b, "%s ", elem)
+    }
+    return b.String()
 }
 
 func copyHeader(dst, src http.Header) {
@@ -78,7 +175,7 @@ func delHopHeaders(header http.Header) {
     }
 }
 
-func serveHTTP(w http.ResponseWriter, req *http.Request) {
+func serveHTTP(w http.ResponseWriter, req *http.Request, db *sql.DB, XXEtesting bool) {
     
     log.Println(req.RemoteAddr, " ", req.Method, " ", req.URL)
 
@@ -97,8 +194,8 @@ func serveHTTP(w http.ResponseWriter, req *http.Request) {
 
     log.Println(req.RemoteAddr, " ", resp.Status)
     
-    storeRequestInDB(req)
-    storeResponseInDB(resp)
+    reqID := storeRequestInDB(req, db, XXEtesting)
+    storeResponseInDB(resp, db, reqID, XXEtesting)
 
     delHopHeaders(resp.Header)
 
@@ -137,8 +234,28 @@ func transfer(destination io.WriteCloser, source io.ReadCloser) {
 }
 
 func main() {
+
+    psqlInfo := fmt.Sprintf("host=%s port=%d user=%s "+
+        "password=%s dbname=%s sslmode=disable",
+        host, port, user, password, dbname)
+    db, err := sql.Open("postgres", psqlInfo)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+  
+    err = db.Ping()
+    if err != nil {
+        log.Fatal(err)
+    }
+  
+    log.Println("Database successfully connected!")
+
+
     var proto string
+    var XXEtesting bool
     flag.StringVar(&proto, "proto", "https", "Proxy protocol (http or https)")
+    flag.BoolVar(&XXEtesting, "xxetest", false, "enable xxe testing")
     flag.Parse()
 
     if proto != "http" && proto != "https" {
@@ -151,7 +268,7 @@ func main() {
             if r.Method == http.MethodConnect {
                 serveConnect(w, r)
             } else {
-                serveHTTP(w, r)
+                serveHTTP(w, r, db, XXEtesting)
             }
         }),
     }
