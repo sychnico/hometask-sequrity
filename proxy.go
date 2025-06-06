@@ -14,8 +14,8 @@ import (
     _ "github.com/lib/pq"
 )
 
-const pemPath = "../server.pem"
-const keyPath = "../server.key"
+const DefaultPemPath = "../server.pem"
+const DefaultKeyPath = "../server.key"
 
 const (
     host     = "localhost"
@@ -261,7 +261,10 @@ func main() {
   
     log.Println("Database successfully connected!")
 
-
+    var pemPath string
+    flag.StringVar(&pemPath, "pem", DefaultPemPath, "path to pem file")
+    var keyPath string
+    flag.StringVar(&keyPath, "key", DefaultKeyPath, "path to key file")
     var proto string
     var XXEtesting bool
     flag.StringVar(&proto, "proto", "https", "Proxy protocol (http or https)")
